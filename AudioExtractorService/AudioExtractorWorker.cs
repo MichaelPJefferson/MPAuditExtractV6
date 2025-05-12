@@ -46,7 +46,6 @@ public class AudioExtractorWorker : BackgroundService
         {
             _logger.LogInformation("New MP4 file detected: {File}", e.Name);
 
-            // Wait for file to be completely written
             WaitForFile(e.FullPath);
 
             string outputFile = Path.Combine(
@@ -58,12 +57,30 @@ public class AudioExtractorWorker : BackgroundService
 
             _logger.LogInformation("Successfully extracted audio to: {OutputFile}", outputFile);
 
-            // Transcribe with Vosk after audio extraction
-            string transcriptFile = Path.Combine(
+            bool transcribeVosk = Convert.ToBoolean(_configuration["VoskEnabled"]);
+            bool transcribeAzure = Convert.ToBoolean(_configuration["AzureEnabled"]);
+            if (transcribeVosk)
+            {
+
+                // Vosk transcription
+                string transcriptFileVosk = Path.Combine(
                 _watchFolder,
-                Path.GetFileNameWithoutExtension(e.Name) + ".txt"
-            );
-            TranscribeWavWithVosk(outputFile, transcriptFile);
+                Path.GetFileNameWithoutExtension(e.Name) + ".vosk.txt"
+                );
+
+                TranscribeWavWithVosk(outputFile, transcriptFileVosk);
+            }
+
+            if (transcribeAzure)
+            {
+                // Azure transcription
+                string transcriptFileAzure = Path.Combine(
+                    _watchFolder,
+                    Path.GetFileNameWithoutExtension(e.Name) + ".azure.txt"
+                );
+                // Fire and forget, or you can await if you make OnFileCreated async
+                _ = TranscribeWavWithAzureAsync(outputFile, transcriptFileAzure);
+            }
         }
         catch (Exception ex)
         {
@@ -164,5 +181,45 @@ public class AudioExtractorWorker : BackgroundService
         var text = System.Text.Json.JsonDocument.Parse(result).RootElement.GetProperty("text").GetString();
         File.WriteAllText(transcriptFilePath, text ?? "[No speech recognized]");
         _logger.LogInformation("Transcription saved to: {TranscriptFile}", transcriptFilePath);
+    }
+    private async Task TranscribeWavWithAzureAsync(string wavFilePath, string transcriptFilePath)
+    {
+        string azureKey = _configuration["AzureSpeechKey"];
+        string azureRegion = _configuration["AzureSpeechRegion"];
+
+        if (string.IsNullOrEmpty(azureKey) || string.IsNullOrEmpty(azureRegion))
+        {
+            _logger.LogError("Azure Speech configuration missing.");
+            await File.WriteAllTextAsync(transcriptFilePath, "[Azure Speech configuration missing]");
+            return;
+        }
+
+        var config = Microsoft.CognitiveServices.Speech.SpeechConfig.FromSubscription(azureKey, azureRegion);
+        config.SpeechRecognitionLanguage = "en-US";
+
+        using var audioInput = Microsoft.CognitiveServices.Speech.Audio.AudioConfig.FromWavFileInput(wavFilePath);
+        using var recognizer = new Microsoft.CognitiveServices.Speech.SpeechRecognizer(config, audioInput);
+
+        var results = new List<string>();
+        var stopRecognition = new TaskCompletionSource<int>();
+
+        recognizer.Recognized += (s, e) =>
+        {
+            if (e.Result.Reason == Microsoft.CognitiveServices.Speech.ResultReason.RecognizedSpeech)
+            {
+                if (!string.IsNullOrWhiteSpace(e.Result.Text))
+                    results.Add(e.Result.Text);
+            }
+        };
+
+        recognizer.SessionStopped += (s, e) => stopRecognition.TrySetResult(0);
+        recognizer.Canceled += (s, e) => stopRecognition.TrySetResult(0);
+
+        await recognizer.StartContinuousRecognitionAsync();
+        await stopRecognition.Task;
+        await recognizer.StopContinuousRecognitionAsync();
+
+        await File.WriteAllTextAsync(transcriptFilePath, string.Join(Environment.NewLine, results));
+        _logger.LogInformation("Azure transcription saved to: {TranscriptFile}", transcriptFilePath);
     }
 }
