@@ -95,6 +95,19 @@ public class AudioExtractorWorker : BackgroundService
                 await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure);
                 swAzure.Stop();
                 perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
+                // Example: translate to Spanish ("es")
+                string translatedFileSpanish = Path.Combine(
+                    _watchFolder,
+                    Path.GetFileNameWithoutExtension(e.Name) + ".azure.es.txt"
+                );
+                await TranslateFileAsync(transcriptFileAzure, translatedFileSpanish, "es");
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcript translated to Spanish: {translatedFileSpanish}");
+                string translatedFileFrench = Path.Combine(
+                    _watchFolder,
+                    Path.GetFileNameWithoutExtension(e.Name) + ".azure.fr.txt"
+                );
+                await TranslateFileAsync(transcriptFileAzure, translatedFileFrench, "fr");
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcript translated to Spanish: {translatedFileFrench}");
             }
         }
         catch (Exception ex)
@@ -276,5 +289,35 @@ public class AudioExtractorWorker : BackgroundService
         await File.WriteAllTextAsync(vttFilePath, vttBuilder.ToString());
 
         _logger.LogInformation("Azure transcription and VTT saved to: {TranscriptFile}, {VttFile}", transcriptFilePath, vttFilePath);
+    }
+    private async Task TranslateFileAsync(string inputFile, string outputFile, string targetLanguage)
+    {
+        string subscriptionKey = _configuration["AzureTranslatorKey"];
+        string endpoint = _configuration["AzureTranslatorEndpoint"];
+
+        if (string.IsNullOrEmpty(subscriptionKey) || string.IsNullOrEmpty(endpoint))
+        {
+            // Log or handle missing config
+            return;
+        }
+
+        string text = await File.ReadAllTextAsync(inputFile);
+
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Key", subscriptionKey);
+        client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Region", _configuration["AzureTranslatorRegion"] ?? "global");
+
+        var requestBody = System.Text.Json.JsonSerializer.Serialize(new[] { new { Text = text } });
+        var requestContent = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+
+        string route = $"/translate?api-version=3.0&to={targetLanguage}";
+        var response = await client.PostAsync(endpoint.TrimEnd('/') + route, requestContent);
+        response.EnsureSuccessStatusCode();
+
+        var jsonResponse = await response.Content.ReadAsStringAsync();
+        using var doc = System.Text.Json.JsonDocument.Parse(jsonResponse);
+        var translatedText = doc.RootElement[0].GetProperty("translations")[0].GetProperty("text").GetString();
+
+        await File.WriteAllTextAsync(outputFile, translatedText ?? "");
     }
 }
