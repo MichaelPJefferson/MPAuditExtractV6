@@ -44,64 +44,82 @@ public class AudioExtractorWorker : BackgroundService
     {
         var perFileLog = new System.Text.StringBuilder();
         string logFile = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".log");
+        string outputFile = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".wav");
+        string transcriptFileVosk = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".vosk.txt");
+        string transcriptFileAzure = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".azure.txt");
+        string vttFileAzure = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".azure.vtt");
+        var targetLanguages = _configuration.GetSection("AzureTranslatorLanguages").Get<string[]>();
+
         try
         {
             perFileLog.AppendLine($"[{DateTime.Now:O}] New MP4 file detected: {e.Name}");
 
             // 1. Wait for file
-            var swWait = System.Diagnostics.Stopwatch.StartNew();
-            WaitForFile(e.FullPath);
-            swWait.Stop();
-            perFileLog.AppendLine($"[{DateTime.Now:O}] Waited {swWait.ElapsedMilliseconds} ms for file to be ready: {e.Name}");
-
-            // 2. Extract audio
-            var swExtract = System.Diagnostics.Stopwatch.StartNew();
-            string outputFile = Path.Combine(
-                _watchFolder,
-                Path.GetFileNameWithoutExtension(e.Name) + ".wav"
-            );
-            ExtractAudio(e.FullPath, outputFile);
-            swExtract.Stop();
-            perFileLog.AppendLine($"[{DateTime.Now:O}] Audio extraction completed in {swExtract.ElapsedMilliseconds} ms: {outputFile}");
-
-            bool transcribeVosk = Convert.ToBoolean(_configuration["VoskEnabled"]);
-            bool transcribeAzure = Convert.ToBoolean(_configuration["AzureEnabled"]);
-
-            // 3. Vosk transcription
-            if (transcribeVosk)
+            try
             {
-                var swVosk = System.Diagnostics.Stopwatch.StartNew();
-                string transcriptFileVosk = Path.Combine(
-                    _watchFolder,
-                    Path.GetFileNameWithoutExtension(e.Name) + ".vosk.txt"
-                );
-                TranscribeWavWithVosk(outputFile, transcriptFileVosk);
-                swVosk.Stop();
-                perFileLog.AppendLine($"[{DateTime.Now:O}] Vosk transcription completed in {swVosk.ElapsedMilliseconds} ms: {transcriptFileVosk}");
+                var swWait = System.Diagnostics.Stopwatch.StartNew();
+                WaitForFile(e.FullPath);
+                swWait.Stop();
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Waited {swWait.ElapsedMilliseconds} ms for file to be ready: {e.Name}");
+            }
+            catch (Exception ex)
+            {
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Error waiting for file: {ex}");
+                return;
             }
 
-            // 4. Azure transcription and VTT
+            // 2. Extract audio
+            try
+            {
+                var swExtract = System.Diagnostics.Stopwatch.StartNew();
+                ExtractAudio(e.FullPath, outputFile);
+                swExtract.Stop();
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Audio extraction completed in {swExtract.ElapsedMilliseconds} ms: {outputFile}");
+            }
+            catch (Exception ex)
+            {
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Error extracting audio: {ex}");
+                return;
+            }
+
+            // 3. Vosk transcription
+            bool transcribeVosk = Convert.ToBoolean(_configuration["VoskEnabled"]);
+            if (transcribeVosk)
+            {
+                try
+                {
+                    var swVosk = System.Diagnostics.Stopwatch.StartNew();
+                    TranscribeWavWithVosk(outputFile, transcriptFileVosk);
+                    swVosk.Stop();
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Vosk transcription completed in {swVosk.ElapsedMilliseconds} ms: {transcriptFileVosk}");
+                }
+                catch (Exception ex)
+                {
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error in Vosk transcription: {ex}");
+                    // Continue to Azure even if Vosk fails
+                }
+            }
+
+            // 4. Azure transcription and VTT (with translations)
+            bool transcribeAzure = Convert.ToBoolean(_configuration["AzureEnabled"]);
             if (transcribeAzure)
             {
-                var swAzure = System.Diagnostics.Stopwatch.StartNew();
-                string transcriptFileAzure = Path.Combine(
-                    _watchFolder,
-                    Path.GetFileNameWithoutExtension(e.Name) + ".azure.txt"
-                );
-                string vttFileAzure = Path.Combine(
-                    _watchFolder,
-                    Path.GetFileNameWithoutExtension(e.Name) + ".azure.vtt"
-                );
-                // Specify the languages you want
-                var targetLanguages = _configuration.GetSection("AzureTranslatorLanguages").Get<string[]>();
-                await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages);
-                swAzure.Stop();
-                perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation (with translations) completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
+                try
+                {
+                    var swAzure = System.Diagnostics.Stopwatch.StartNew();
+                    await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages);
+                    swAzure.Stop();
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation (with translations) completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
+                }
+                catch (Exception ex)
+                {
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error in Azure transcription/VTT/translation: {ex}");
+                }
             }
         }
         catch (Exception ex)
         {
-            perFileLog.AppendLine($"[{DateTime.Now:O}] Error processing file: {e.Name} - {ex}");
+            perFileLog.AppendLine($"[{DateTime.Now:O}] Unexpected error processing file: {e.Name} - {ex}");
         }
         finally
         {
@@ -134,23 +152,30 @@ public class AudioExtractorWorker : BackgroundService
 
     private void ExtractAudio(string inputFile, string outputFile)
     {
-        using var process = new System.Diagnostics.Process();
-        process.StartInfo = new System.Diagnostics.ProcessStartInfo
+        try
         {
-            FileName = _ffmpegPath,
-            Arguments = $"-i \"{inputFile}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{outputFile}\"",
-            UseShellExecute = false,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
+            using var process = new System.Diagnostics.Process();
+            process.StartInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _ffmpegPath,
+                Arguments = $"-i \"{inputFile}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{outputFile}\"",
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
 
-        process.Start();
-        string error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+            process.Start();
+            string error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
 
-        if (process.ExitCode != 0)
+            if (process.ExitCode != 0)
+            {
+                throw new Exception($"FFmpeg failed with error: {error}");
+            }
+        }
+        catch (Exception ex)
         {
-            throw new Exception($"FFmpeg failed with error: {error}");
+            throw new Exception($"Audio extraction failed for {inputFile}: {ex.Message}", ex);
         }
     }
 
@@ -328,28 +353,39 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
 
         if (string.IsNullOrEmpty(subscriptionKey) || string.IsNullOrEmpty(endpoint))
         {
-            // Log or handle missing config
-            return;
+            throw new InvalidOperationException("Azure Translator configuration missing.");
         }
 
         string text = await File.ReadAllTextAsync(inputFile);
 
-        using var client = new HttpClient();
-        client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Key", subscriptionKey);
-        client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Region", _configuration["AzureTranslatorRegion"] ?? "global");
+        try
+        {
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Key", subscriptionKey);
+            client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Region", _configuration["AzureTranslatorRegion"] ?? "global");
 
-        var requestBody = System.Text.Json.JsonSerializer.Serialize(new[] { new { Text = text } });
-        var requestContent = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+            var requestBody = System.Text.Json.JsonSerializer.Serialize(new[] { new { Text = text } });
+            var requestContent = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
 
-        string route = $"/translate?api-version=3.0&to={targetLanguage}";
-        var response = await client.PostAsync(endpoint.TrimEnd('/') + route, requestContent);
-        response.EnsureSuccessStatusCode();
+            string route = $"/translate?api-version=3.0&to={targetLanguage}";
+            var response = await client.PostAsync(endpoint.TrimEnd('/') + route, requestContent);
 
-        var jsonResponse = await response.Content.ReadAsStringAsync();
-        using var doc = System.Text.Json.JsonDocument.Parse(jsonResponse);
-        var translatedText = doc.RootElement[0].GetProperty("translations")[0].GetProperty("text").GetString();
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                throw new Exception($"Translation API failed: {response.StatusCode} - {errorContent}");
+            }
 
-        await File.WriteAllTextAsync(outputFile, translatedText ?? "");
+            var jsonResponse = await response.Content.ReadAsStringAsync();
+            using var doc = System.Text.Json.JsonDocument.Parse(jsonResponse);
+            var translatedText = doc.RootElement[0].GetProperty("translations")[0].GetProperty("text").GetString();
+
+            await File.WriteAllTextAsync(outputFile, translatedText ?? "");
+        }
+        catch (Exception ex)
+        {
+            throw new Exception($"Translation failed for {inputFile} to {targetLanguage}: {ex.Message}", ex);
+        }
     }
     private async Task<string> TranslateTextAsync(string text, string targetLanguage)
     {
