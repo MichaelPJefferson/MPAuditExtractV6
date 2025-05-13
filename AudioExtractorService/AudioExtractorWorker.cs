@@ -11,6 +11,9 @@ using Microsoft.CognitiveServices.Speech.Audio;
 
 namespace AudioExtractorService;
 
+/// <summary>
+/// Background service that watches a folder for new MP4 files, extracts audio, transcribes, translates, and generates VTT/WAV files.
+/// </summary>
 public class AudioExtractorWorker : BackgroundService
 {
     private readonly ILogger<AudioExtractorWorker> _logger;
@@ -19,6 +22,11 @@ public class AudioExtractorWorker : BackgroundService
     private readonly string _watchFolder;
     private readonly string _ffmpegPath;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AudioExtractorWorker"/> class.
+    /// </summary>
+    /// <param name="logger">Logger for diagnostic output.</param>
+    /// <param name="configuration">Application configuration.</param>
     public AudioExtractorWorker(ILogger<AudioExtractorWorker> logger, IConfiguration configuration)
     {
         _logger = logger;
@@ -37,6 +45,11 @@ public class AudioExtractorWorker : BackgroundService
         };
     }
 
+    /// <summary>
+    /// Starts the background service and begins watching for new files.
+    /// </summary>
+    /// <param name="stoppingToken">Cancellation token.</param>
+    /// <returns>A completed task.</returns>
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _watcher.Created += OnFileCreated;
@@ -45,6 +58,10 @@ public class AudioExtractorWorker : BackgroundService
         return Task.CompletedTask;
     }
 
+
+    /// <summary>
+    /// Handles the creation of new files in the watched folder.
+    /// </summary>
     private async void OnFileCreated(object sender, FileSystemEventArgs e)
     {
         var perFileLog = new System.Text.StringBuilder();
@@ -112,7 +129,7 @@ public class AudioExtractorWorker : BackgroundService
                 try
                 {
                     var swAzure = System.Diagnostics.Stopwatch.StartNew();
-                    await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages);
+                    await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages, perFileLog);
                     swAzure.Stop();
                     perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation (with translations) completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
                 }
@@ -126,12 +143,48 @@ public class AudioExtractorWorker : BackgroundService
         {
             perFileLog.AppendLine($"[{DateTime.Now:O}] Unexpected error processing file: {e.Name} - {ex}");
         }
+
+        // Write and close the log file before moving files
+        System.IO.File.WriteAllText(logFile, perFileLog.ToString());
+        // At the end of OnFileCreated, before the finally block
+        try
+        {
+            // Determine the base name and target directory
+            string baseName = Path.GetFileNameWithoutExtension(e.Name);
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string targetDir = Path.Combine(_watchFolder, $"{baseName}_{timestamp}");
+
+            // Create the directory if it doesn't exist
+            Directory.CreateDirectory(targetDir);
+
+            // List all files with the same base name (regardless of extension)
+            var filesToMove = Directory.GetFiles(_watchFolder, baseName + ".*");
+
+            foreach (var file in filesToMove)
+            {
+                // Skip if the file is already in the target directory
+                if (Path.GetDirectoryName(file) == targetDir)
+                    continue;
+
+                string destFile = Path.Combine(targetDir, Path.GetFileName(file));
+                // If file exists in target, overwrite
+                File.Move(file, destFile, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            perFileLog.AppendLine($"[{DateTime.Now:O}] Error moving files to output folder: {ex}");
+        }
         finally
         {
             System.IO.File.WriteAllText(logFile, perFileLog.ToString());
         }
     }
 
+    /// <summary>
+    /// Waits until the specified file is no longer locked by another process.
+    /// </summary>
+    /// <param name="filePath">The file path to check.</param>
     private void WaitForFile(string filePath)
     {
         const int maxAttempts = 10;
@@ -155,6 +208,12 @@ public class AudioExtractorWorker : BackgroundService
         throw new TimeoutException($"File {filePath} is still being used after {maxAttempts} seconds");
     }
 
+
+    /// <summary>
+    /// Extracts audio from an input video file using FFmpeg.
+    /// </summary>
+    /// <param name="inputFile">The input video file path.</param>
+    /// <param name="outputFile">The output WAV file path.</param>
     private void ExtractAudio(string inputFile, string outputFile)
     {
         try
@@ -184,6 +243,9 @@ public class AudioExtractorWorker : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Stops the background service and disposes the file system watcher.
+    /// </summary>
     public override Task StopAsync(CancellationToken cancellationToken)
     {
         _watcher.EnableRaisingEvents = false;
@@ -191,6 +253,11 @@ public class AudioExtractorWorker : BackgroundService
         return base.StopAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Transcribes a WAV file using the Vosk speech recognition engine.
+    /// </summary>
+    /// <param name="wavFilePath">Path to the WAV file.</param>
+    /// <param name="transcriptFilePath">Path to save the transcript.</param>
     private void TranscribeWavWithVosk(string wavFilePath, string transcriptFilePath)
     {
         // Path to your Vosk model directory (update as needed)
@@ -232,19 +299,30 @@ public class AudioExtractorWorker : BackgroundService
         var text = System.Text.Json.JsonDocument.Parse(result).RootElement.GetProperty("text").GetString();
         File.WriteAllText(transcriptFilePath, text ?? "[No speech recognized]");
     }
-  
-  
-async Task TranscribeAndGenerateVttWithAzureAsync(
+
+    /// <summary>
+    /// Transcribes a WAV file using Azure Speech, generates VTT and TXT files, and optionally translates and synthesizes them to other languages.
+    /// </summary>
+    /// <param name="wavFilePath">Input WAV file path.</param>
+    /// <param name="transcriptFilePath">Output transcript TXT file path.</param>
+    /// <param name="vttFilePath">Output VTT file path.</param>
+    /// <param name="targetLanguages">Array of language codes for translation and synthesis.</param>
+
+    private async Task TranscribeAndGenerateVttWithAzureAsync(
         string wavFilePath,
         string transcriptFilePath,
         string vttFilePath,
-        string[] targetLanguages = null)
+        string[] targetLanguages,
+        System.Text.StringBuilder perFileLog)
     {
+        perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Starting transcription for: {wavFilePath}");
+
         string azureKey = _configuration["AzureSpeechKey"];
         string azureRegion = _configuration["AzureSpeechRegion"];
 
         if (string.IsNullOrEmpty(azureKey) || string.IsNullOrEmpty(azureRegion))
         {
+            perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Speech configuration missing.");
             await File.WriteAllTextAsync(transcriptFilePath, "[Azure Speech configuration missing]");
             await File.WriteAllTextAsync(vttFilePath, "WEBVTT\n\nNOTE Azure Speech configuration missing");
             return;
@@ -304,68 +382,85 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
             }
         };
 
+        perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Starting speech recognition...");
         recognizer.SessionStopped += (s, e) => stopRecognition.TrySetResult(0);
         recognizer.Canceled += (s, e) => stopRecognition.TrySetResult(0);
 
         await recognizer.StartContinuousRecognitionAsync();
         await stopRecognition.Task;
         await recognizer.StopContinuousRecognitionAsync();
+        perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Speech recognition complete.");
 
         // Write original files
         await File.WriteAllTextAsync(transcriptFilePath, string.Join(Environment.NewLine, transcriptLines));
         await File.WriteAllTextAsync(vttFilePath, vttBuilder.ToString());
+        perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Transcript and VTT files written: {transcriptFilePath}, {vttFilePath}");
 
         // Translate to other languages if requested
         if (targetLanguages != null)
         {
             foreach (var lang in targetLanguages)
             {
-                // Translate TXT
-                string translatedTxtPath = Path.Combine(
-                    Path.GetDirectoryName(transcriptFilePath)!,
-                    Path.GetFileNameWithoutExtension(transcriptFilePath) + $".{lang}.txt"
-                );
-                await TranslateFileAsync(transcriptFilePath, translatedTxtPath, lang);
-
-                // Translate VTT
-                string translatedVttPath = Path.Combine(
-                    Path.GetDirectoryName(vttFilePath)!,
-                    Path.GetFileNameWithoutExtension(vttFilePath) + $".{lang}.vtt"
-                );
-
-                // Translate each phrase and build a new VTT
-                var translatedVttBuilder = new System.Text.StringBuilder();
-                translatedVttBuilder.AppendLine("WEBVTT\n");
-                int idx = 1;
-                foreach (var (phrase, start, end) in vttSegments)
+                try
                 {
-                    string translatedPhrase = await TranslateTextAsync(phrase, lang);
-                    translatedVttBuilder.AppendLine($"{idx}");
-                    translatedVttBuilder.AppendLine($"{start:hh\\:mm\\:ss\\.fff} --> {end:hh\\:mm\\:ss\\.fff}");
-                    translatedVttBuilder.AppendLine(translatedPhrase);
-                    translatedVttBuilder.AppendLine();
-                    idx++;
-                }
-                await File.WriteAllTextAsync(translatedVttPath, translatedVttBuilder.ToString());
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Translating to {lang}...");
+                    // Translate TXT
+                    string translatedTxtPath = Path.Combine(
+                        Path.GetDirectoryName(transcriptFilePath)!,
+                        Path.GetFileNameWithoutExtension(transcriptFilePath) + $".{lang}.txt"
+                    );
+                    await TranslateFileAsync(transcriptFilePath, translatedTxtPath, lang);
 
-                // Translate WAV
-                string translatedWavPath = Path.Combine(
-                    Path.GetDirectoryName(transcriptFilePath)!,
-                    Path.GetFileNameWithoutExtension(transcriptFilePath) + $".{lang}.wav"
-                );
-                await GenerateWavFromVttAsync(
-                    translatedVttPath,
-                    translatedWavPath,
-                    _configuration["AzureSpeechKey"],
-                    _configuration["AzureSpeechRegion"],
-                    lang, // language code, e.g., "es-ES"
-                    GetVoiceNameForLanguage(lang) // implement this helper to map language to a voice
-                );
-               
+                    // Translate VTT
+                    string translatedVttPath = Path.Combine(
+                        Path.GetDirectoryName(vttFilePath)!,
+                        Path.GetFileNameWithoutExtension(vttFilePath) + $".{lang}.vtt"
+                    );
+
+                    // Translate each phrase and build a new VTT
+                    var translatedVttBuilder = new System.Text.StringBuilder();
+                    translatedVttBuilder.AppendLine("WEBVTT\n");
+                    int idx = 1;
+                    foreach (var (phrase, start, end) in vttSegments)
+                    {
+                        string translatedPhrase = await TranslateTextAsync(phrase, lang);
+                        translatedVttBuilder.AppendLine($"{idx}");
+                        translatedVttBuilder.AppendLine($"{start:hh\\:mm\\:ss\\.fff} --> {end:hh\\:mm\\:ss\\.fff}");
+                        translatedVttBuilder.AppendLine(translatedPhrase);
+                        translatedVttBuilder.AppendLine();
+                        idx++;
+                    }
+                    await File.WriteAllTextAsync(translatedVttPath, translatedVttBuilder.ToString());
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Translation and VTT for {lang} written: {translatedTxtPath}, {translatedVttPath}");
+
+                    // Translate WAV
+                    string translatedWavPath = Path.Combine(
+                        Path.GetDirectoryName(transcriptFilePath)!,
+                        Path.GetFileNameWithoutExtension(transcriptFilePath) + $".{lang}.wav"
+                    );
+                    await GenerateWavFromVttAsync(
+                        translatedVttPath,
+                        translatedWavPath,
+                        _configuration["AzureSpeechKey"],
+                        _configuration["AzureSpeechRegion"],
+                        lang, // language code, e.g., "es-ES"
+                        GetVoiceNameForLanguage(lang) // implement this helper to map language to a voice
+                    );
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Synthesized WAV for {lang}: {translatedWavPath}");
+                }
+                catch (Exception ex)
+                {
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Error in translation/synthesis for {lang}: {ex}");
+                }
             }
         }
     }
 
+    /// <summary>
+    /// Maps a language code to an Azure voice name.
+    /// </summary>
+    /// <param name="lang">Language code (e.g., "es").</param>
+    /// <returns>Azure voice name.</returns>
     private string GetVoiceNameForLanguage(string lang)
     {
         // Map language codes to Azure voice names as needed
@@ -378,6 +473,12 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
             _ => "en-US-GuyNeural"
         };
     }
+    /// <summary>
+    /// Translates a text file to a target language using Azure Translator and saves the result.
+    /// </summary>
+    /// <param name="inputFile">Input file path.</param>
+    /// <param name="outputFile">Output file path.</param>
+    /// <param name="targetLanguage">Target language code.</param>
     private async Task TranslateFileAsync(string inputFile, string outputFile, string targetLanguage)
     {
         string subscriptionKey = _configuration["AzureTranslatorKey"];
@@ -419,6 +520,13 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
             throw new Exception($"Translation failed for {inputFile} to {targetLanguage}: {ex.Message}", ex);
         }
     }
+    
+    /// <summary>
+    /// Translates a string to a target language using Azure Translator.
+    /// </summary>
+    /// <param name="text">Text to translate.</param>
+    /// <param name="targetLanguage">Target language code.</param>
+    /// <returns>Translated text.</returns>
     private async Task<string> TranslateTextAsync(string text, string targetLanguage)
     {
         string subscriptionKey = _configuration["AzureTranslatorKey"];
@@ -442,6 +550,15 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
         using var doc = System.Text.Json.JsonDocument.Parse(jsonResponse);
         return doc.RootElement[0].GetProperty("translations")[0].GetProperty("text").GetString() ?? text;
     }
+        /// <summary>
+    /// Generates a WAV file from a VTT file by synthesizing each cue using Azure Speech.
+    /// </summary>
+    /// <param name="vttFilePath">Input VTT file path.</param>
+    /// <param name="outputWavPath">Output WAV file path.</param>
+    /// <param name="azureSpeechKey">Azure Speech API key.</param>
+    /// <param name="azureSpeechRegion">Azure Speech region.</param>
+    /// <param name="languageCode">Language code for synthesis (e.g., "es-ES").</param>
+    /// <param name="voiceName">Azure voice name for synthesis.</param>
 
     public async Task GenerateWavFromVttAsync(
         string vttFilePath,
