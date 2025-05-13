@@ -4,6 +4,11 @@ using Microsoft.Extensions.Configuration;
 using Vosk;
 using NAudio.Wave;
 
+using System.Globalization;
+using System.Text.RegularExpressions;
+using Microsoft.CognitiveServices.Speech;
+using Microsoft.CognitiveServices.Speech.Audio;
+
 namespace AudioExtractorService;
 
 public class AudioExtractorWorker : BackgroundService
@@ -342,10 +347,37 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
                     idx++;
                 }
                 await File.WriteAllTextAsync(translatedVttPath, translatedVttBuilder.ToString());
+
+                // Translate WAV
+                string translatedWavPath = Path.Combine(
+                    Path.GetDirectoryName(transcriptFilePath)!,
+                    Path.GetFileNameWithoutExtension(transcriptFilePath) + $".{lang}.wav"
+                );
+                await GenerateWavFromVttAsync(
+                    translatedVttPath,
+                    translatedWavPath,
+                    _configuration["AzureSpeechKey"],
+                    _configuration["AzureSpeechRegion"],
+                    lang, // language code, e.g., "es-ES"
+                    GetVoiceNameForLanguage(lang) // implement this helper to map language to a voice
+                );
+               
             }
         }
     }
 
+    private string GetVoiceNameForLanguage(string lang)
+    {
+        // Map language codes to Azure voice names as needed
+        return lang switch
+        {
+            "es" => "es-ES-AlvaroNeural",
+            "fr" => "fr-FR-HenriNeural",
+            "de" => "de-DE-ConradNeural",
+            // Add more mappings as needed
+            _ => "en-US-GuyNeural"
+        };
+    }
     private async Task TranslateFileAsync(string inputFile, string outputFile, string targetLanguage)
     {
         string subscriptionKey = _configuration["AzureTranslatorKey"];
@@ -410,4 +442,84 @@ async Task TranscribeAndGenerateVttWithAzureAsync(
         using var doc = System.Text.Json.JsonDocument.Parse(jsonResponse);
         return doc.RootElement[0].GetProperty("translations")[0].GetProperty("text").GetString() ?? text;
     }
+
+    public async Task GenerateWavFromVttAsync(
+        string vttFilePath,
+        string outputWavPath,
+        string azureSpeechKey,
+        string azureSpeechRegion,
+        string languageCode, // e.g., "es-ES"
+        string voiceName     // e.g., "es-ES-AlvaroNeural"
+    )
+    {
+        // 1. Parse VTT
+        var cues = new List<(TimeSpan start, TimeSpan end, string text)>();
+        var regex = new Regex(
+            @"^\s*(\d+)\s*[\r\n]+(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})\s*[\r\n]+(.*?)(?=(?:\r?\n){2,}|\z)",
+            RegexOptions.Multiline | RegexOptions.Singleline);
+        var vttText = await File.ReadAllTextAsync(vttFilePath);
+        foreach (Match match in regex.Matches(vttText))
+        {
+            var start = TimeSpan.ParseExact(match.Groups[2].Value, @"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture);
+            var end = TimeSpan.ParseExact(match.Groups[3].Value, @"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture);
+            var text = match.Groups[4].Value.Replace("\n", " ").Trim();
+            cues.Add((start, end, text));
+        }
+
+        Console.WriteLine($"[WAV Generation] {cues.Count} cues found in {Path.GetFileName(vttFilePath)}.");
+
+        // 2. Synthesize each caption and align
+        var config = SpeechConfig.FromSubscription(azureSpeechKey, azureSpeechRegion);
+        config.SpeechSynthesisLanguage = languageCode;
+        config.SpeechSynthesisVoiceName = voiceName;
+        var sampleRate = 16000;
+        var allAudio = new List<byte[]>();
+        var currentPosition = TimeSpan.Zero;
+
+        for (int i = 0; i < cues.Count; i++)
+        {
+            var cue = cues[i];
+
+            // Insert silence if needed
+            if (cue.start > currentPosition)
+            {
+                var silenceDuration = cue.start - currentPosition;
+                var silenceBytes = new byte[(int)(silenceDuration.TotalSeconds * sampleRate * 2)]; // 16-bit mono
+                allAudio.Add(silenceBytes);
+                Console.WriteLine($"[WAV Generation] Inserted {silenceDuration.TotalMilliseconds:F0} ms silence before cue {i + 1}.");
+            }
+
+            Console.WriteLine($"[WAV Generation] Synthesizing cue {i + 1}/{cues.Count}: \"{cue.text}\"");
+            byte[] result = await SpeechSynthesizerToWavBytesAsync(config, cue.text, sampleRate);
+            allAudio.Add(result);
+
+            currentPosition = cue.end;
+        }
+
+        // 3. Concatenate and save as WAV
+        Console.WriteLine($"[WAV Generation] Writing output WAV: {Path.GetFileName(outputWavPath)}");
+        using var ms = new MemoryStream();
+        using (var writer = new WaveFileWriter(ms, new WaveFormat(sampleRate, 16, 1)))
+        {
+            foreach (var audio in allAudio)
+                writer.Write(audio, 0, audio.Length);
+        }
+        File.WriteAllBytes(outputWavPath, ms.ToArray());
+        Console.WriteLine($"[WAV Generation] Done: {outputWavPath}");
+    }
+
+    // Helper: Synthesize speech to WAV bytes
+    private async Task<byte[]> SpeechSynthesizerToWavBytesAsync(SpeechConfig config, string text, int sampleRate)
+    {
+        using var audioStream = AudioOutputStream.CreatePullStream();
+        using var audioConfig = AudioConfig.FromStreamOutput(audioStream);
+        using var synthesizer = new SpeechSynthesizer(config, audioConfig);
+
+        var result = await synthesizer.SpeakTextAsync(text);
+        if (result.Reason != ResultReason.SynthesizingAudioCompleted)
+            throw new Exception($"Speech synthesis failed: {result.Reason}");
+
+        return result.AudioData;
+    }
+
 }
