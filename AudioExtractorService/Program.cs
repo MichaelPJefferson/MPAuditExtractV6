@@ -1,23 +1,31 @@
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
-namespace AudioExtractorService;
+var isConsole = args.Contains("--console", StringComparer.OrdinalIgnoreCase);
 
-public class Program
+var builder = Host.CreateDefaultBuilder(args);
+
+if (!isConsole)
 {
-    public static void Main(string[] args)
-    {
-        IHost host = Host.CreateDefaultBuilder(args)
-            .UseWindowsService(options =>
-            {
-                options.ServiceName = "Audio Extractor Service";
-            })
-            .ConfigureServices(services =>
-            {
-                services.AddHostedService<AudioExtractorWorker>();
-            })
-            .Build();
-
-        host.Run();
-    }
+    builder = builder.UseWindowsService();
 }
+
+builder
+    .ConfigureLogging((context, logging) =>
+    {
+        logging.ClearProviders();
+        logging.AddConsole(); // Optional: keep for debugging when running as console
+        logging.AddEventLog(settings =>
+        {
+            settings.SourceName = "AudioExtractorService";
+            settings.LogName = "Application";
+        });
+    })
+    .ConfigureServices((hostContext, services) =>
+    {
+        services.AddHostedService<AudioExtractorService.AudioExtractorWorker>();
+        // Add other services/configuration as needed
+    })
+    .Build()
+    .Run();

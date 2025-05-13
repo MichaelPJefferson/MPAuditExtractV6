@@ -33,6 +33,7 @@ public class AudioExtractorWorker : BackgroundService
         _configuration = configuration;
         _watchFolder = _configuration["WatchFolder"] ?? throw new InvalidOperationException("WatchFolder not configured");
         _ffmpegPath = _configuration["FFmpegPath"] ?? "ffmpeg.exe";
+        Console.WriteLine($"WatchFolder {_watchFolder}");
 
         // Ensure watch folder exists
         Directory.CreateDirectory(_watchFolder);
@@ -50,12 +51,25 @@ public class AudioExtractorWorker : BackgroundService
     /// </summary>
     /// <param name="stoppingToken">Cancellation token.</param>
     /// <returns>A completed task.</returns>
-    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _watcher.Created += OnFileCreated;
         _watcher.EnableRaisingEvents = true;
 
-        return Task.CompletedTask;
+        // Process existing files at startup
+        var existingFiles = Directory.GetFiles(_watchFolder, "*.mp4");
+        foreach (var file in existingFiles)
+        {
+            // Optionally check for cancellation
+            if (stoppingToken.IsCancellationRequested)
+                break;
+
+            // Process each file asynchronously, but don't await all at once to avoid overload
+            await ProcessFileAsync(file);
+        }
+
+        // Keep the service running
+        await Task.CompletedTask;
     }
 
 
@@ -64,117 +78,7 @@ public class AudioExtractorWorker : BackgroundService
     /// </summary>
     private async void OnFileCreated(object sender, FileSystemEventArgs e)
     {
-        var perFileLog = new System.Text.StringBuilder();
-        string logFile = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".log");
-        string outputFile = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".wav");
-        string transcriptFileVosk = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".vosk.txt");
-        string transcriptFileAzure = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".azure.txt");
-        string vttFileAzure = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".azure.vtt");
-        var targetLanguages = _configuration.GetSection("AzureTranslatorLanguages").Get<string[]>();
-
-        try
-        {
-            perFileLog.AppendLine($"[{DateTime.Now:O}] New MP4 file detected: {e.Name}");
-
-            // 1. Wait for file
-            try
-            {
-                var swWait = System.Diagnostics.Stopwatch.StartNew();
-                WaitForFile(e.FullPath);
-                swWait.Stop();
-                perFileLog.AppendLine($"[{DateTime.Now:O}] Waited {swWait.ElapsedMilliseconds} ms for file to be ready: {e.Name}");
-            }
-            catch (Exception ex)
-            {
-                perFileLog.AppendLine($"[{DateTime.Now:O}] Error waiting for file: {ex}");
-                return;
-            }
-
-            // 2. Extract audio
-            try
-            {
-                var swExtract = System.Diagnostics.Stopwatch.StartNew();
-                ExtractAudio(e.FullPath, outputFile);
-                swExtract.Stop();
-                perFileLog.AppendLine($"[{DateTime.Now:O}] Audio extraction completed in {swExtract.ElapsedMilliseconds} ms: {outputFile}");
-            }
-            catch (Exception ex)
-            {
-                perFileLog.AppendLine($"[{DateTime.Now:O}] Error extracting audio: {ex}");
-                return;
-            }
-
-            // 3. Vosk transcription
-            bool transcribeVosk = Convert.ToBoolean(_configuration["VoskEnabled"]);
-            if (transcribeVosk)
-            {
-                try
-                {
-                    var swVosk = System.Diagnostics.Stopwatch.StartNew();
-                    TranscribeWavWithVosk(outputFile, transcriptFileVosk);
-                    swVosk.Stop();
-                    perFileLog.AppendLine($"[{DateTime.Now:O}] Vosk transcription completed in {swVosk.ElapsedMilliseconds} ms: {transcriptFileVosk}");
-                }
-                catch (Exception ex)
-                {
-                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error in Vosk transcription: {ex}");
-                    // Continue to Azure even if Vosk fails
-                }
-            }
-
-            // 4. Azure transcription and VTT (with translations)
-            bool transcribeAzure = Convert.ToBoolean(_configuration["AzureEnabled"]);
-            if (transcribeAzure)
-            {
-                try
-                {
-                    var swAzure = System.Diagnostics.Stopwatch.StartNew();
-                    await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages, perFileLog);
-                    swAzure.Stop();
-                    perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation (with translations) completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
-                }
-                catch (Exception ex)
-                {
-                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error in Azure transcription/VTT/translation: {ex}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            perFileLog.AppendLine($"[{DateTime.Now:O}] Unexpected error processing file: {e.Name} - {ex}");
-        }
-
-        // Write and close the log file before moving files
-        System.IO.File.WriteAllText(logFile, perFileLog.ToString());
-        // At the end of OnFileCreated, before the finally block
-        try
-        {
-            // Determine the base name and target directory
-            string baseName = Path.GetFileNameWithoutExtension(e.Name);
-            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string targetDir = Path.Combine(_watchFolder, $"{baseName}_{timestamp}");
-
-            // Create the directory if it doesn't exist
-            Directory.CreateDirectory(targetDir);
-
-            // List all files with the same base name (regardless of extension)
-            var filesToMove = Directory.GetFiles(_watchFolder, baseName + ".*");
-
-            foreach (var file in filesToMove)
-            {
-                // Skip if the file is already in the target directory
-                if (Path.GetDirectoryName(file) == targetDir)
-                    continue;
-
-                string destFile = Path.Combine(targetDir, Path.GetFileName(file));
-                // If file exists in target, overwrite
-                File.Move(file, destFile, true);
-            }
-        }
-        catch (Exception ex)
-        {
-            perFileLog.AppendLine($"[{DateTime.Now:O}] Error moving files to output folder: {ex}");
-        }
+        await ProcessFileInternalAsync(e);
     }
 
     /// <summary>
@@ -212,29 +116,43 @@ public class AudioExtractorWorker : BackgroundService
     /// <param name="outputFile">The output WAV file path.</param>
     private void ExtractAudio(string inputFile, string outputFile)
     {
+        Console.WriteLine($"[FFmpeg] Preparing to extract audio from: {inputFile}");
+        string arguments = $"-i \"{inputFile}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{outputFile}\"";
+        Console.WriteLine($"[FFmpeg] Command: {_ffmpegPath} {arguments}");
+
         try
         {
             using var process = new System.Diagnostics.Process();
             process.StartInfo = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = _ffmpegPath,
-                Arguments = $"-i \"{inputFile}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{outputFile}\"",
+                Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
 
-            process.Start();
+            bool started = process.Start();
+            if (!started)
+            {
+                Console.WriteLine("[FFmpeg] Failed to start FFmpeg process.");
+                throw new Exception("FFmpeg process could not be started.");
+            }
+
             string error = process.StandardError.ReadToEnd();
             process.WaitForExit();
 
             if (process.ExitCode != 0)
             {
+                Console.WriteLine($"[FFmpeg] FFmpeg exited with code {process.ExitCode}. Error output:\n{error}");
                 throw new Exception($"FFmpeg failed with error: {error}");
             }
+
+            Console.WriteLine($"[FFmpeg] Audio extraction succeeded: {outputFile}");
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"[FFmpeg] Exception during audio extraction: {ex.Message}");
             throw new Exception($"Audio extraction failed for {inputFile}: {ex.Message}", ex);
         }
     }
@@ -634,5 +552,132 @@ public class AudioExtractorWorker : BackgroundService
 
         return result.AudioData;
     }
+    private async Task ProcessFileAsync(string filePath)
+    {
+        // Simulate a FileSystemEventArgs for reuse
+        var e = new FileSystemEventArgs(WatcherChangeTypes.Created, Path.GetDirectoryName(filePath)!, Path.GetFileName(filePath));
+        await ProcessFileInternalAsync(e);
+    }
+
+    // This is your refactored OnFileCreated logic, now as a Task
+    private async Task ProcessFileInternalAsync(FileSystemEventArgs e)
+    {
+        Console.WriteLine($"Processing file: {e.Name}");
+
+        var perFileLog = new System.Text.StringBuilder();
+        string logFile = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".log");
+        string outputFile = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".wav");
+        string transcriptFileVosk = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".vosk.txt");
+        string transcriptFileAzure = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".azure.txt");
+        string vttFileAzure = Path.Combine(_watchFolder, Path.GetFileNameWithoutExtension(e.Name) + ".azure.vtt");
+        var targetLanguages = _configuration.GetSection("AzureTranslatorLanguages").Get<string[]>();
+
+        try
+        {
+            perFileLog.AppendLine($"[{DateTime.Now:O}] New MP4 file detected: {e.Name}");
+
+            // 1. Wait for file
+            try
+            {
+                var swWait = System.Diagnostics.Stopwatch.StartNew();
+                WaitForFile(e.FullPath);
+                swWait.Stop();
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Waited {swWait.ElapsedMilliseconds} ms for file to be ready: {e.Name}");
+            }
+            catch (Exception ex)
+            {
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Error waiting for file: {ex}");
+                return;
+            }
+
+            // 2. Extract audio
+            try
+            {
+                var swExtract = System.Diagnostics.Stopwatch.StartNew();
+                ExtractAudio(e.FullPath, outputFile);
+                swExtract.Stop();
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Audio extraction completed in {swExtract.ElapsedMilliseconds} ms: {outputFile}");
+            }
+            catch (Exception ex)
+            {
+                perFileLog.AppendLine($"[{DateTime.Now:O}] Error extracting audio: {ex}");
+                return;
+            }
+
+            // 3. Vosk transcription
+            bool transcribeVosk = Convert.ToBoolean(_configuration["VoskEnabled"]);
+            if (transcribeVosk)
+            {
+                try
+                {
+                    var swVosk = System.Diagnostics.Stopwatch.StartNew();
+                    TranscribeWavWithVosk(outputFile, transcriptFileVosk);
+                    swVosk.Stop();
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Vosk transcription completed in {swVosk.ElapsedMilliseconds} ms: {transcriptFileVosk}");
+                }
+                catch (Exception ex)
+                {
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error in Vosk transcription: {ex}");
+                    // Continue to Azure even if Vosk fails
+                }
+            }
+
+            // 4. Azure transcription and VTT (with translations)
+            bool transcribeAzure = Convert.ToBoolean(_configuration["AzureEnabled"]);
+            if (transcribeAzure)
+            {
+                try
+                {
+                    var swAzure = System.Diagnostics.Stopwatch.StartNew();
+                    await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages, perFileLog);
+                    swAzure.Stop();
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation (with translations) completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
+                }
+                catch (Exception ex)
+                {
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error in Azure transcription/VTT/translation: {ex}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            perFileLog.AppendLine($"[{DateTime.Now:O}] Unexpected error processing file: {e.Name} - {ex}");
+        }
+
+        // Write and close the log file before moving files
+        System.IO.File.WriteAllText(logFile, perFileLog.ToString());
+        // At the end of OnFileCreated, before the finally block
+        try
+        {
+            // Determine the base name and target directory
+            string baseName = Path.GetFileNameWithoutExtension(e.Name);
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string targetDir = Path.Combine(_watchFolder, $"{baseName}_{timestamp}");
+
+            // Create the directory if it doesn't exist
+            Directory.CreateDirectory(targetDir);
+
+            // List all files with the same base name (regardless of extension)
+            var filesToMove = Directory.GetFiles(_watchFolder, baseName + ".*");
+
+            foreach (var file in filesToMove)
+            {
+                // Skip if the file is already in the target directory
+                if (Path.GetDirectoryName(file) == targetDir)
+                    continue;
+
+                string destFile = Path.Combine(targetDir, Path.GetFileName(file));
+                // If file exists in target, overwrite
+                File.Move(file, destFile, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            perFileLog.AppendLine($"[{DateTime.Now:O}] Error moving files to output folder: {ex}");
+        }
+
+    }
+
+
 
 }

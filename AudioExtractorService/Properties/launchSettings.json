@@ -2,6 +2,7 @@
   "profiles": {
     "AudioExtractorService": {
       "commandName": "Project",
+      "commandLineArgs": "--console",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development"
       },
