@@ -175,10 +175,6 @@ public class AudioExtractorWorker : BackgroundService
         {
             perFileLog.AppendLine($"[{DateTime.Now:O}] Error moving files to output folder: {ex}");
         }
-        finally
-        {
-            System.IO.File.WriteAllText(logFile, perFileLog.ToString());
-        }
     }
 
     /// <summary>
