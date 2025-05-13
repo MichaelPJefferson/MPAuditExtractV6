@@ -223,6 +223,7 @@ public class AudioExtractorWorker : BackgroundService
     /// <param name="targetLanguages">Array of language codes for translation and synthesis.</param>
 
     private async Task TranscribeAndGenerateVttWithAzureAsync(
+        string sourceVideoPath,
         string wavFilePath,
         string transcriptFilePath,
         string vttFilePath,
@@ -358,9 +359,19 @@ public class AudioExtractorWorker : BackgroundService
                         _configuration["AzureSpeechKey"],
                         _configuration["AzureSpeechRegion"],
                         lang, // language code, e.g., "es-ES"
-                        GetVoiceNameForLanguage(lang) // implement this helper to map language to a voice
+                        GetVoiceNameForLanguage(lang), // implement this helper to map language to a voice
+                        perFileLog
                     );
                     perFileLog.AppendLine($"[{DateTime.Now:O}] [Azure] Synthesized WAV for {lang}: {translatedWavPath}");
+
+                    // Mux with video
+                    string outputMp4Path = Path.Combine(
+                        Path.GetDirectoryName(translatedWavPath)!,
+                        Path.GetFileNameWithoutExtension(translatedWavPath) + ".mp4"
+                    );
+                    MuxVideoWithWav(sourceVideoPath, translatedWavPath, outputMp4Path);
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Muxed video and audio to {outputMp4Path}");
+
                 }
                 catch (Exception ex)
                 {
@@ -385,6 +396,24 @@ public class AudioExtractorWorker : BackgroundService
             "de" => "de-DE-ConradNeural",
             // Add more mappings as needed
             _ => "en-US-GuyNeural"
+        };
+    }
+
+    /// <summary>
+    /// Maps a language code to an Azure voice name.
+    /// </summary>
+    /// <param name="lang">Language code (e.g., "es").</param>
+    /// <returns>Azure voice name.</returns>
+    private string GetFolderForLanguage(string lang)
+    {
+        // Map language codes to Azure voice names as needed
+        return lang switch
+        {
+            "es" => "Spanish",
+            "fr" => "French",
+            "de" => "Dutch",
+            // Add more mappings as needed
+            _ => "English"
         };
     }
     /// <summary>
@@ -480,8 +509,8 @@ public class AudioExtractorWorker : BackgroundService
         string azureSpeechKey,
         string azureSpeechRegion,
         string languageCode, // e.g., "es-ES"
-        string voiceName     // e.g., "es-ES-AlvaroNeural"
-    )
+        string voiceName,     // e.g., "es-ES-AlvaroNeural"
+        System.Text.StringBuilder perFileLog)
     {
         // 1. Parse VTT
         var cues = new List<(TimeSpan start, TimeSpan end, string text)>();
@@ -629,7 +658,7 @@ public class AudioExtractorWorker : BackgroundService
                 try
                 {
                     var swAzure = System.Diagnostics.Stopwatch.StartNew();
-                    await TranscribeAndGenerateVttWithAzureAsync(outputFile, transcriptFileAzure, vttFileAzure, targetLanguages, perFileLog);
+                    await TranscribeAndGenerateVttWithAzureAsync(e.FullPath, outputFile, transcriptFileAzure, vttFileAzure, targetLanguages, perFileLog);
                     swAzure.Stop();
                     perFileLog.AppendLine($"[{DateTime.Now:O}] Azure transcription and VTT generation (with translations) completed in {swAzure.ElapsedMilliseconds} ms: {transcriptFileAzure}, {vttFileAzure}");
                 }
@@ -653,22 +682,49 @@ public class AudioExtractorWorker : BackgroundService
             string baseName = Path.GetFileNameWithoutExtension(e.Name);
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string targetDir = Path.Combine(_watchFolder, $"{baseName}_{timestamp}");
-
+            
             // Create the directory if it doesn't exist
             Directory.CreateDirectory(targetDir);
+
+            string targetDirLanguageSpecific = Path.Combine(targetDir, GetFolderForLanguage("en"));
+            Directory.CreateDirectory(targetDirLanguageSpecific);
+            foreach (var lang in targetLanguages)
+            {
+                targetDirLanguageSpecific = Path.Combine(targetDir, GetFolderForLanguage(lang));
+                Directory.CreateDirectory(targetDirLanguageSpecific);
+            }
 
             // List all files with the same base name (regardless of extension)
             var filesToMove = Directory.GetFiles(_watchFolder, baseName + ".*");
 
             foreach (var file in filesToMove)
-            {
-                // Skip if the file is already in the target directory
-                if (Path.GetDirectoryName(file) == targetDir)
-                    continue;
+            { 
+                try
+                {
+                    // Skip if the file is already in the target directory
+                    if (Path.GetDirectoryName(file) == targetDir)
+                        continue;
 
-                string destFile = Path.Combine(targetDir, Path.GetFileName(file));
-                // If file exists in target, overwrite
-                File.Move(file, destFile, true);
+                    string destinationFilename = Path.GetFileName(file).Replace(".azure", "");
+
+                    string finalTargetDirectory = Path.Combine(targetDir, GetFolderForLanguage("en")); ;
+                    foreach (var lang in targetLanguages)
+                    {
+                        if (destinationFilename.Contains("." + lang + "."))
+                        { // Check if the file is for this language
+                            finalTargetDirectory = Path.Combine(targetDir, GetFolderForLanguage(lang));
+                            destinationFilename = destinationFilename.Replace("." + lang, "");
+                            ; break;
+                        }
+                    }
+                    string destFile = Path.Combine(finalTargetDirectory, Path.GetFileName(destinationFilename));
+                    // If file exists in target, overwrite
+                    File.Move(file, destFile, true);
+                }
+                catch (Exception ex)
+                {
+                    perFileLog.AppendLine($"[{DateTime.Now:O}] Error moving file {file} to {targetDir}: {ex}");
+                }
             }
         }
         catch (Exception ex)
@@ -677,7 +733,50 @@ public class AudioExtractorWorker : BackgroundService
         }
 
     }
+    private void MuxVideoWithWav(string sourceVideoPath, string wavFilePath, string outputMp4Path)
+    {
+        Console.WriteLine($"[FFmpeg] Muxing video '{sourceVideoPath}' with audio '{wavFilePath}' to '{outputMp4Path}'");
+        // removed -shortest option so that we pad with silence (if audio is shorter) or black video (if audio is longer)
+        string arguments = $"-y -i \"{sourceVideoPath}\" -i \"{wavFilePath}\" -c:v copy -c:a aac -b:a 192k -map 0:v:0 -map 1:a:0 \"{outputMp4Path}\"";
+        Console.WriteLine($"[FFmpeg] Command: {_ffmpegPath} {arguments}");
 
+        try
+        {
+            using var process = new System.Diagnostics.Process();
+            process.StartInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _ffmpegPath,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            bool started = process.Start();
+            if (!started)
+            {
+                Console.WriteLine("[FFmpeg] Failed to start FFmpeg process for muxing.");
+                throw new Exception("FFmpeg process could not be started for muxing.");
+            }
+
+            var errorTask = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            errorTask.Wait();
+            string error=errorTask.Result;
+            if (process.ExitCode != 0)
+            {
+                Console.WriteLine($"[FFmpeg] FFmpeg exited with code {process.ExitCode} during muxing. Error output:\n{error}");
+                throw new Exception($"FFmpeg failed with error: {error}");
+            }
+
+            Console.WriteLine($"[FFmpeg] Muxing succeeded: {outputMp4Path}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FFmpeg] Exception during muxing: {ex.Message}");
+            throw new Exception($"Muxing failed for {sourceVideoPath} + {wavFilePath}: {ex.Message}", ex);
+        }
+    }
 
 
 }
