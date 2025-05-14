@@ -7,6 +7,10 @@
       "RelativeMoniker": "D:0:0:{12345678-1234-1234-1234-123456789012}|AudioExtractorService\\AudioExtractorService.csproj|solutionrelative:audioextractorservice\\audioextractorworker.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
+      "AbsoluteMoniker": "D:0:0:{12345678-1234-1234-1234-123456789012}|AudioExtractorService\\AudioExtractorService.csproj|f:\\ai\\mpauditextractv6\\audioextractorservice\\appsettings.development.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
+      "RelativeMoniker": "D:0:0:{12345678-1234-1234-1234-123456789012}|AudioExtractorService\\AudioExtractorService.csproj|solutionrelative:audioextractorservice\\appsettings.development.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}"
+    },
+    {
       "AbsoluteMoniker": "D:0:0:{12345678-1234-1234-1234-123456789012}|AudioExtractorService\\AudioExtractorService.csproj|f:\\ai\\mpauditextractv6\\audioextractorservice\\audioextractorservice.csproj||{04B8AB82-A572-4FEF-95CE-5222444B6B64}|",
       "RelativeMoniker": "D:0:0:{12345678-1234-1234-1234-123456789012}|AudioExtractorService\\AudioExtractorService.csproj|solutionrelative:audioextractorservice\\audioextractorservice.csproj||{04B8AB82-A572-4FEF-95CE-5222444B6B64}|"
     },
@@ -26,7 +30,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 2,
+          "SelectedChildIndex": 3,
           "Children": [
             {
               "$type": "Bookmark",
@@ -35,6 +39,19 @@
             {
               "$type": "Document",
               "DocumentIndex": 1,
+              "Title": "appsettings.Development.json",
+              "DocumentMoniker": "F:\\AI\\MPAuditExtractV6\\AudioExtractorService\\appsettings.Development.json",
+              "RelativeDocumentMoniker": "AudioExtractorService\\appsettings.Development.json",
+              "ToolTip": "F:\\AI\\MPAuditExtractV6\\AudioExtractorService\\appsettings.Development.json",
+              "RelativeToolTip": "AudioExtractorService\\appsettings.Development.json",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
+              "WhenOpened": "2025-05-13T22:52:41.072Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
               "Title": "AudioExtractorService",
               "DocumentMoniker": "F:\\AI\\MPAuditExtractV6\\AudioExtractorService\\AudioExtractorService.csproj",
               "RelativeDocumentMoniker": "AudioExtractorService\\AudioExtractorService.csproj",
@@ -52,14 +69,14 @@
               "RelativeDocumentMoniker": "AudioExtractorService\\AudioExtractorWorker.cs",
               "ToolTip": "F:\\AI\\MPAuditExtractV6\\AudioExtractorService\\AudioExtractorWorker.cs",
               "RelativeToolTip": "AudioExtractorService\\AudioExtractorWorker.cs",
-              "ViewState": "AgIAANgCAAAAAAAAAAAYwOECAAAGAAAAAAAAAA==",
+              "ViewState": "AgIAAMQCAAAAAAAAAAAAwNECAAAXAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2025-05-12T16:02:38.042Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 2,
+              "DocumentIndex": 3,
               "Title": "AudioExtractorService",
               "DocumentMoniker": "F:\\AI\\MPAuditExtractV6\\AudioExtractorService\\AudioExtractorService.csproj",
               "RelativeDocumentMoniker": "AudioExtractorService\\AudioExtractorService.csproj",
@@ -72,7 +89,7 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 3,
+              "DocumentIndex": 4,
               "Title": "Program.cs",
               "DocumentMoniker": "F:\\AI\\MPAuditExtractV6\\AudioExtractorService\\Program.cs",
               "RelativeDocumentMoniker": "AudioExtractorService\\Program.cs",

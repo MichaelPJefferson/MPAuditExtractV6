@@ -369,7 +369,7 @@ public class AudioExtractorWorker : BackgroundService
                         Path.GetDirectoryName(translatedWavPath)!,
                         Path.GetFileNameWithoutExtension(translatedWavPath) + ".mp4"
                     );
-                    MuxVideoWithWav(sourceVideoPath, translatedWavPath, outputMp4Path);
+                    await MuxVideoWithWavAsync(sourceVideoPath, translatedWavPath, outputMp4Path);
                     perFileLog.AppendLine($"[{DateTime.Now:O}] Muxed video and audio to {outputMp4Path}");
 
                 }
@@ -719,7 +719,15 @@ public class AudioExtractorWorker : BackgroundService
                     }
                     string destFile = Path.Combine(finalTargetDirectory, Path.GetFileName(destinationFilename));
                     // If file exists in target, overwrite
-                    File.Move(file, destFile, true);
+                    try
+                    {
+                        File.Move(file, destFile, true);
+                    }
+                    catch (Exception ex1)
+                    {
+                        perFileLog.AppendLine($"[{DateTime.Now:O}] Error moving file - will try copying instead {file} to {targetDir}: {ex1}");
+                        File.Copy(file, destFile, true);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -737,7 +745,7 @@ public class AudioExtractorWorker : BackgroundService
     {
         Console.WriteLine($"[FFmpeg] Muxing video '{sourceVideoPath}' with audio '{wavFilePath}' to '{outputMp4Path}'");
         // removed -shortest option so that we pad with silence (if audio is shorter) or black video (if audio is longer)
-        string arguments = $"-y -i \"{sourceVideoPath}\" -i \"{wavFilePath}\" -c:v copy -c:a aac -b:a 192k -map 0:v:0 -map 1:a:0 \"{outputMp4Path}\"";
+        string arguments = $"-y -i \"{sourceVideoPath}\" -i \"{wavFilePath}\" -c:v copy -c:a aac -b:a 192k -map 0:v:0 -map 1:a:0 -shortest  \"{outputMp4Path}\"";
         Console.WriteLine($"[FFmpeg] Command: {_ffmpegPath} {arguments}");
 
         try
@@ -763,6 +771,49 @@ public class AudioExtractorWorker : BackgroundService
             process.WaitForExit();
             errorTask.Wait();
             string error=errorTask.Result;
+            if (process.ExitCode != 0)
+            {
+                Console.WriteLine($"[FFmpeg] FFmpeg exited with code {process.ExitCode} during muxing. Error output:\n{error}");
+                throw new Exception($"FFmpeg failed with error: {error}");
+            }
+            process.Close();
+            Console.WriteLine($"[FFmpeg] Muxing succeeded: {outputMp4Path}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FFmpeg] Exception during muxing: {ex.Message}");
+            throw new Exception($"Muxing failed for {sourceVideoPath} + {wavFilePath}: {ex.Message}", ex);
+        }
+    }
+    private async Task MuxVideoWithWavAsync(string sourceVideoPath, string wavFilePath, string outputMp4Path)
+    {
+        Console.WriteLine($"[FFmpeg] Muxing video '{sourceVideoPath}' with audio '{wavFilePath}' to '{outputMp4Path}'");
+        string arguments = $"-y -i \"{sourceVideoPath}\" -i \"{wavFilePath}\" -c:v copy -c:a aac -b:a 192k -map 0:v:0 -map 1:a:0 -shortest \"{outputMp4Path}\"";
+        Console.WriteLine($"[FFmpeg] Command: {_ffmpegPath} {arguments}");
+
+        try
+        {
+            using var process = new System.Diagnostics.Process();
+            process.StartInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _ffmpegPath,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            if (!process.Start())
+            {
+                Console.WriteLine("[FFmpeg] Failed to start FFmpeg process for muxing.");
+                throw new Exception("FFmpeg process could not be started for muxing.");
+            }
+
+            // Read error asynchronously and wait for process exit
+            var errorTask = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            string error = await errorTask;
+
             if (process.ExitCode != 0)
             {
                 Console.WriteLine($"[FFmpeg] FFmpeg exited with code {process.ExitCode} during muxing. Error output:\n{error}");
