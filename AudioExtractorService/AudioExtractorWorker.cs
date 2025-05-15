@@ -220,6 +220,19 @@ public class AudioExtractorWorker : BackgroundService
         File.WriteAllText(transcriptFilePath, text ?? "[No speech recognized]");
     }
 
+
+    /// <summary>
+    /// Transcribes a WAV audio file using Azure Speech-to-Text, generates a VTT subtitle file,
+    /// writes the transcript and VTT to disk, and for each target language, translates the transcript and VTT,
+    /// synthesizes speech, and muxes the new audio with the original video.
+    /// </summary>
+    /// <param name="sourceVideoPath">Path to the original source video file (MP4).</param>
+    /// <param name="wavFilePath">Path to the extracted WAV audio file.</param>
+    /// <param name="transcriptFilePath">Path to save the Azure transcript text file.</param>
+    /// <param name="vttFilePath">Path to save the Azure-generated VTT subtitle file.</param>
+    /// <param name="targetLanguages">Array of target language codes for translation and synthesis (e.g., "es", "fr").</param>
+    /// <param name="perFileLog">StringBuilder for logging per-file processing details and errors.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task TranscribeAndGenerateVttWithAzureAsync(
     string sourceVideoPath,
     string wavFilePath,
@@ -253,6 +266,20 @@ public class AudioExtractorWorker : BackgroundService
         }
     }
 
+
+    /// <summary>
+    /// Performs detailed speech recognition on a WAV audio file using Azure Speech-to-Text,
+    /// returning the recognized transcript lines, VTT (WebVTT) caption segments, and the full VTT content.
+    /// </summary>
+    /// <param name="wavFilePath">Path to the input WAV audio file.</param>
+    /// <param name="perFileLog">StringBuilder for logging per-file processing details and errors.</param>
+    /// <returns>
+    /// A tuple containing:
+    ///   - List of recognized transcript lines,
+    ///   - List of VTT segments (phrase, start time, end time),
+    ///   - The complete VTT file content as a string.
+    /// Returns (null, null, string.Empty) if recognition fails or configuration is missing.
+    /// </returns>
     private async Task<(List<string>? transcriptLines, List<(string phrase, TimeSpan start, TimeSpan end)>? vttSegments, string vttContent)>
         AzureTranscribeWav(string wavFilePath, System.Text.StringBuilder perFileLog)
     {
@@ -327,6 +354,18 @@ public class AudioExtractorWorker : BackgroundService
         return (transcriptLines, vttSegments, vttBuilder.ToString());
     }
 
+
+
+    /// <summary>
+    /// Writes the transcript lines to a text file and the VTT (WebVTT) content to a subtitle file.
+    /// Logs the completion of these actions and verifies that the files were created successfully.
+    /// </summary>
+    /// <param name="transcriptFilePath">Path to save the transcript text file.</param>
+    /// <param name="vttFilePath">Path to save the VTT subtitle file.</param>
+    /// <param name="transcriptLines">List of transcript lines to write.</param>
+    /// <param name="vttContent">Full VTT file content as a string.</param>
+    /// <param name="perFileLog">StringBuilder for logging per-file processing details and errors.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task WriteTranscriptAndVtt(
         string transcriptFilePath,
         string vttFilePath,
@@ -344,6 +383,19 @@ public class AudioExtractorWorker : BackgroundService
             perFileLog.AppendLine($"[{DateTime.Now:O}] ERROR: Expected Azure VTT not found: {vttFilePath}");
     }
 
+
+    /// <summary>
+    /// For a given target language, translates the transcript and VTT files, writes the translated files,
+    /// synthesizes speech from the translated VTT using Azure Speech, and muxes the synthesized audio with the original video.
+    /// Logs each step and verifies the existence of all expected output files.
+    /// </summary>
+    /// <param name="sourceVideoPath">Path to the original source video file (MP4).</param>
+    /// <param name="transcriptFilePath">Path to the transcript text file to translate.</param>
+    /// <param name="vttFilePath">Path to the VTT subtitle file to translate.</param>
+    /// <param name="vttSegments">List of VTT segments (phrase, start time, end time) for translation and synthesis.</param>
+    /// <param name="lang">Target language code (e.g., "es", "fr").</param>
+    /// <param name="perFileLog">StringBuilder for logging per-file processing details and errors.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task ProcessAzureLanguageVariant(
         string sourceVideoPath,
         string transcriptFilePath,
@@ -409,6 +461,16 @@ public class AudioExtractorWorker : BackgroundService
             perFileLog.AppendLine($"[{DateTime.Now:O}] ERROR: Expected muxed MP4 not found: {outputMp4Path}");
     }
 
+
+    /// <summary>
+    /// Translates each phrase in the provided VTT segments to the specified target language,
+    /// constructs a translated VTT (WebVTT) subtitle file, writes it to disk, and logs the operation.
+    /// </summary>
+    /// <param name="translatedVttPath">Path to save the translated VTT subtitle file.</param>
+    /// <param name="vttSegments">List of VTT segments (phrase, start time, end time) to translate and write.</param>
+    /// <param name="lang">Target language code for translation (e.g., "es", "fr").</param>
+    /// <param name="perFileLog">StringBuilder for logging per-file processing details and errors.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task WriteTranslatedVtt(
         string translatedVttPath,
         List<(string phrase, TimeSpan start, TimeSpan end)> vttSegments,
@@ -438,15 +500,10 @@ public class AudioExtractorWorker : BackgroundService
     /// <returns>Azure voice name.</returns>
     private string GetVoiceNameForLanguage(string lang)
     {
-        // Map language codes to Azure voice names as needed
-        return lang switch
-        {
-            "es" => "es-ES-AlvaroNeural",
-            "fr" => "fr-FR-HenriNeural",
-            "de" => "de-DE-ConradNeural",
-            // Add more mappings as needed
-            _ => "en-US-GuyNeural"
-        };
+        var voices = _configuration.GetSection("AzureVoiceNames").Get<Dictionary<string, string>>();
+        return voices != null && voices.TryGetValue(lang, out var voice)
+            ? voice
+            : voices?["default"] ?? "en-US-GuyNeural";
     }
 
     /// <summary>
@@ -456,15 +513,10 @@ public class AudioExtractorWorker : BackgroundService
     /// <returns>Azure voice name.</returns>
     private string GetFolderForLanguage(string lang)
     {
-        // Map language codes to Azure voice names as needed
-        return lang switch
-        {
-            "es" => "Spanish",
-            "fr" => "French",
-            "de" => "Dutch",
-            // Add more mappings as needed
-            _ => "English"
-        };
+        var folders = _configuration.GetSection("LanguageFolders").Get<Dictionary<string, string>>();
+        return folders != null && folders.TryGetValue(lang, out var folder)
+            ? folder
+            : folders?["default"] ?? "English";
     }
     /// <summary>
     /// Translates a text file to a target language using Azure Translator and saves the result.
@@ -619,6 +671,15 @@ public class AudioExtractorWorker : BackgroundService
     }
 
     // Helper: Synthesize speech to WAV bytes
+    /// <summary>
+    /// Synthesizes speech from the provided text using the specified Azure Speech configuration,
+    /// and returns the resulting audio as a WAV byte array with the given sample rate.
+    /// Throws an exception if speech synthesis fails.
+    /// </summary>
+    /// <param name="config">Azure SpeechConfig specifying subscription, region, language, and voice.</param>
+    /// <param name="text">The text to synthesize into speech.</param>
+    /// <param name="sampleRate">Desired sample rate for the output WAV audio (e.g., 16000 Hz).</param>
+    /// <returns>A byte array containing the synthesized WAV audio data.</returns>
     private async Task<byte[]> SpeechSynthesizerToWavBytesAsync(SpeechConfig config, string text, int sampleRate)
     {
         using var audioStream = AudioOutputStream.CreatePullStream();
@@ -632,6 +693,14 @@ public class AudioExtractorWorker : BackgroundService
 
         return result.AudioData;
     }
+    
+
+    /// <summary>
+    /// Initiates processing of a specified file by simulating a file creation event,
+    /// allowing the file to be handled by the internal processing workflow.
+    /// </summary>
+    /// <param name="filePath">The full path to the file to process.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task ProcessFileAsync(string filePath)
     {
         // Simulate a FileSystemEventArgs for reuse
@@ -639,7 +708,15 @@ public class AudioExtractorWorker : BackgroundService
         await ProcessFileInternalAsync(e);
     }
 
-    // This is your refactored OnFileCreated logic, now as a Task
+
+    /// <summary>
+    /// Handles the complete processing workflow for a detected MP4 file event.
+    /// Waits for the file to be ready, extracts audio, performs Vosk and Azure transcriptions,
+    /// generates transcripts and VTT files, translates and synthesizes for target languages,
+    /// organizes output files into language-specific folders, and logs all actions and errors.
+    /// </summary>
+    /// <param name="e">FileSystemEventArgs representing the file to process.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task ProcessFileInternalAsync(FileSystemEventArgs e)
     {
         Console.WriteLine($"Processing file: {e.Name}");
@@ -808,50 +885,15 @@ public class AudioExtractorWorker : BackgroundService
         }
 
     }
-    private void MuxVideoWithWav(string sourceVideoPath, string wavFilePath, string outputMp4Path)
-    {
-        Console.WriteLine($"[FFmpeg] Muxing video '{sourceVideoPath}' with audio '{wavFilePath}' to '{outputMp4Path}'");
-        // removed -shortest option so that we pad with silence (if audio is shorter) or black video (if audio is longer)
-        string arguments = $"-y -i \"{sourceVideoPath}\" -i \"{wavFilePath}\" -c:v copy -c:a aac -b:a 192k -map 0:v:0 -map 1:a:0 -shortest  \"{outputMp4Path}\"";
-        Console.WriteLine($"[FFmpeg] Command: {_ffmpegPath} {arguments}");
-
-        try
-        {
-            using var process = new System.Diagnostics.Process();
-            process.StartInfo = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = _ffmpegPath,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            bool started = process.Start();
-            if (!started)
-            {
-                Console.WriteLine("[FFmpeg] Failed to start FFmpeg process for muxing.");
-                throw new Exception("FFmpeg process could not be started for muxing.");
-            }
-
-            var errorTask = process.StandardError.ReadToEndAsync();
-            process.WaitForExit();
-            errorTask.Wait();
-            string error=errorTask.Result;
-            if (process.ExitCode != 0)
-            {
-                Console.WriteLine($"[FFmpeg] FFmpeg exited with code {process.ExitCode} during muxing. Error output:\n{error}");
-                throw new Exception($"FFmpeg failed with error: {error}");
-            }
-            process.Close();
-            Console.WriteLine($"[FFmpeg] Muxing succeeded: {outputMp4Path}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[FFmpeg] Exception during muxing: {ex.Message}");
-            throw new Exception($"Muxing failed for {sourceVideoPath} + {wavFilePath}: {ex.Message}", ex);
-        }
-    }
+    
+    /// <summary>
+    /// Asynchronously combines a source MP4 video file and a WAV audio file into a new MP4 file using FFmpeg.
+    /// The video stream is copied, and the audio is encoded as AAC. Throws an exception if the FFmpeg process fails.
+    /// </summary>
+    /// <param name="sourceVideoPath">Path to the source MP4 video file.</param>
+    /// <param name="wavFilePath">Path to the WAV audio file to mux with the video.</param>
+    /// <param name="outputMp4Path">Path to save the resulting MP4 file.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
     private async Task MuxVideoWithWavAsync(string sourceVideoPath, string wavFilePath, string outputMp4Path)
     {
         Console.WriteLine($"[FFmpeg] Muxing video '{sourceVideoPath}' with audio '{wavFilePath}' to '{outputMp4Path}'");
